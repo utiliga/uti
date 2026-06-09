@@ -1281,12 +1281,12 @@ body {
 // Seus apps → Web app → Configuração do SDK
 // ─────────────────────────────────────────────
 const fbConfig = {
-  apiKey:            "AIzaSyB2bWb3qkSzM6wt8LqzClGtYEU6FMRinfc",
-  authDomain:        "uti-pol.firebaseapp.com",
-  projectId:         "uti-pol",
-  storageBucket:     "uti-pol.firebasestorage.app",
-  messagingSenderId: "529116920869",
-  appId:             "1:529116920869:web:f7ec733472ef5b59b993cc"
+  apiKey:            "COLE_AQUI_apiKey",
+  authDomain:        "COLE_AQUI_authDomain",
+  projectId:         "COLE_AQUI_projectId",
+  storageBucket:     "COLE_AQUI_storageBucket",
+  messagingSenderId: "COLE_AQUI_messagingSenderId",
+  appId:             "COLE_AQUI_appId"
 };
 firebase.initializeApp(fbConfig);
 const db = firebase.firestore();
@@ -1523,6 +1523,19 @@ async function abrirLeito(uti, leito) {
     setTurno(APP.turno);
     showView('viewLeito');
     setTab('tPaciente');
+    // Verificar rascunho local mais recente
+    const draft = verificarRascunho(APP.leitoId);
+    if (draft && draft.leitoId === APP.leitoId) {
+      const diffMin = Math.floor((Date.now() - draft.timestamp) / 60000);
+      if (diffMin < 120) {
+        const banner = document.getElementById('draftBanner');
+        if (banner) banner.style.display = 'flex';
+      }
+    }
+    // Observador de mudanças para auto-save
+    watchForm();
+    // Escalas dinâmicas e indicadores
+    setTimeout(() => { atualizarEscalaDor(); atualizarNEWS2(); updateTabIndicators(); }, 120);
   } catch(e) {
     showToast('Erro ao carregar leito');
     console.error(e);
@@ -1859,6 +1872,22 @@ function populateForm() {
 
   // Histórico
   renderHistorico(o.historico || []);
+  // Restaurar componentes GCS
+  if (o.glasgow_ao) setGCSFromValue('ao', parseInt(o.glasgow_ao));
+  if (o.glasgow_rv) setGCSFromValue('rv', parseInt(o.glasgow_rv));
+  if (o.glasgow_rm) setGCSFromValue('rm', parseInt(o.glasgow_rm));
+  const gcsTot = (APP_GCS.ao||0)+(APP_GCS.rv||0)+(APP_GCS.rm||0);
+  if (gcsTot > 0) {
+    const ge = document.getElementById('glasgowTotal');
+    const gi = document.getElementById('glasgow');
+    if (ge) ge.textContent = gcsTot;
+    if (gi) gi.value = gcsTot;
+  }
+  // Restaurar EVA
+  const svO = o.sinais_vitais || {};
+  ['M','T','N'].forEach(t => { if (svO[t]?.dor) EVA_VALS[t] = String(svO[t].dor); });
+  // Atualizar escalas e VMI condicional
+  setTimeout(() => { checkVMIConditional(); atualizarEscalaDor(); atualizarNEWS2(); }, 50);
 }
 
 function renderHistorico(hist) {
@@ -1976,6 +2005,7 @@ function readForm() {
 
   return {
     estado_geral, situacao_saude: get('situacaoSaude'), lesoes_curativos: get('lesoesText'),
+    glasgow_ao: APP_GCS.ao || '', glasgow_rv: APP_GCS.rv || '', glasgow_rm: APP_GCS.rm || '',
     pulseira: pul?.checked||false, escova: esc?.checked||false,
     glasgow: get('glasgow'), rass: get('rass'), braden: get('braden'), ramsay: get('ramsay'), pupilas: get('pupilas'),
     neurologico, ventilatorio, dispositivos, infusao,
@@ -2033,6 +2063,13 @@ async function salvarOcorrencia() {
     await db.collection('utipol').doc(APP.leitoId).set({ ocorrencia: dados }, { merge: true });
     renderHistorico(historico);
     showToast('✅ Ocorrência salva com sucesso!');
+    // Limpar rascunho local após salvar
+    localStorage.removeItem(`utipol_draft_${APP.leitoId}`);
+    const draftSt = document.getElementById('draftStatus');
+    if (draftSt) draftSt.textContent = '';
+    const draftBn = document.getElementById('draftBanner');
+    if (draftBn) draftBn.style.display = 'none';
+    updateTabIndicators();
   } catch(e) {
     showToast('❌ Erro ao salvar: ' + e.message);
     console.error(e);
@@ -2130,52 +2167,9 @@ function defaultOcorrencia() {
 // ════════════════════════════════════════════
 // GERAR SBAR VIA GROQ
 // ════════════════════════════════════════════
-async function gerarSBAR() {
-  const groqKey = localStorage.getItem('groqKey');
-  if(!groqKey) { openModal('modalConfig'); showToast('Configure a chave Groq primeiro'); return; }
 
-  showLoading('Gerando evolução com IA...');
-  try {
-    const dados = readForm();
-    APP.ocorrencia = { ...APP.ocorrencia, ...dados };
-    const prompt = buildPrompt(dados);
 
-    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${groqKey}` },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        temperature: 0.25,
-        max_tokens: 4096,
-        messages: [
-          { role:'system', content:'Você é um enfermeiro intensivista especialista em oncologia. Responda APENAS com JSON válido, sem markdown, sem texto extra, sem ```json.' },
-          { role:'user', content: prompt }
-        ]
-      })
-    });
-    const json = await resp.json();
-    if(!json.choices) throw new Error(JSON.stringify(json));
-    let raw = json.choices[0].message.content.trim();
-    raw = raw.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
-    let result = JSON.parse(raw);
-    // Normalizar formato texto corrido/resumido para estrutura comum
-    if (result.texto && !result.sbar) {
-      result.sbar = { situacao: result.texto, background: '', avaliacao: '', recomendacao: '' };
-    }
-    APP.sbarData = result;
-    renderSBAR(result);
-    showView('viewSBAR');
-  } catch(e) {
-    showToast('❌ Erro ao gerar: ' + e.message);
-    console.error(e);
-  } finally { hideLoading(); }
-}
 
-function regenerarSBAR() {
-  showView('viewLeito');
-  setTab('tGerar');
-  gerarSBAR();
-}
 
 let formatoEvolucao = 'sbar';
 
@@ -2241,11 +2235,7 @@ function buildDataBlock(o) {
   };
 }
 
-function buildPrompt(o) {
-  if (formatoEvolucao === 'texto') return buildPromptTexto(o);
-  if (formatoEvolucao === 'resumido') return buildPromptResumido(o);
-  return buildPromptSBAR(o);
-}
+
 
 function buildPromptSBAR(o) {
   const D = buildDataBlock(o);
@@ -3171,95 +3161,27 @@ async function copiarPassagem() {
   catch { document.getElementById('passagemIAText').select(); document.execCommand('copy'); showToast('✅ Copiado!'); }
 }
 
-// ════════════════════════════════════════════
-// MODIFICAR salvarOcorrencia: limpar rascunho
-// ════════════════════════════════════════════
-const _origSalvar = salvarOcorrencia;
-
-// ════════════════════════════════════════════
-// EXTEND abrirLeito: verificar rascunho
-// ════════════════════════════════════════════
-const _origAbrirLeito = abrirLeito;
-async function abrirLeito(uti, leito) {
-  await _origAbrirLeito(uti, leito);
-  // Verificar rascunho mais recente
-  const draft = verificarRascunho(APP.leitoId);
-  if (draft && draft.leitoId === APP.leitoId) {
-    const diffMin = Math.floor((Date.now() - draft.timestamp) / 60000);
-    if (diffMin < 120) { // rascunho nas últimas 2h
-      const banner = document.getElementById('draftBanner');
-      if (banner) banner.style.display = 'flex';
-    }
-  }
-  // Iniciar observador de mudanças
-  watchForm();
-  // Renderizar escala de dor e NEWS2 iniciais
-  setTimeout(() => { atualizarEscalaDor(); atualizarNEWS2(); updateTabIndicators(); }, 100);
-}
-
-// Limpar rascunho ao salvar com sucesso
-const _origSalvarOcc = salvarOcorrencia;
-salvarOcorrencia = async function() {
-  await _origSalvarOcc();
-  localStorage.removeItem(`utipol_draft_${APP.leitoId}`);
-  document.getElementById('draftStatus').textContent = '';
-  const banner = document.getElementById('draftBanner');
-  if (banner) banner.style.display = 'none';
-  updateTabIndicators();
-};
-
-// SV inputs também disparam NEWS2
-setTimeout(() => {
-  ['M','T','N'].forEach(t => {
-    ['fr','sat','pa','fc','t'].forEach(p => {
-      const el = document.getElementById(`sv_${p}_${t}`);
-      if (el) el.addEventListener('input', atualizarNEWS2);
-    });
-  });
-}, 500);
-
-// Atualizar Glasgow ao popular form
-const _origPopulate = populateForm;
-populateForm = function() {
-  _origPopulate();
-  // Restaurar GCS components se houver valores salvos
-  const o = APP.ocorrencia || {};
-  if (o.glasgow_ao) setGCSFromValue('ao', parseInt(o.glasgow_ao));
-  if (o.glasgow_rv) setGCSFromValue('rv', parseInt(o.glasgow_rv));
-  if (o.glasgow_rm) setGCSFromValue('rm', parseInt(o.glasgow_rm));
-  const total = (APP_GCS.ao||0)+(APP_GCS.rv||0)+(APP_GCS.rm||0);
-  if (total > 0) {
-    document.getElementById('glasgowTotal').textContent = total;
-    document.getElementById('glasgow').value = total;
-  }
-  // Restaurar EVA
-  const sv = o.sinais_vitais || {};
-  ['M','T','N'].forEach(t => { if(sv[t]?.dor) EVA_VALS[t] = sv[t].dor; });
-  // Atualizar escalas
-  setTimeout(() => { checkVMIConditional(); atualizarEscalaDor(); atualizarNEWS2(); }, 50);
-};
-
-// Salvar GCS components no readForm
-const _origReadForm = readForm;
-readForm = function() {
-  const dados = _origReadForm();
-  dados.glasgow_ao = APP_GCS.ao || '';
-  dados.glasgow_rv = APP_GCS.rv || '';
-  dados.glasgow_rm = APP_GCS.rm || '';
-  return dados;
-};
-
-// Carregar histórico ao abrir aba tGerar
-document.addEventListener('click', e => {
-  const btn = e.target.closest('.tab-btn[data-tab="tGerar"]');
-  if (btn) carregarHistoricoEvolucoes();
-});
+// [bloco wrapper removido — lógica incorporada nas funções originais]
 
 
 window.addEventListener('load', () => {
   renderPainel();
   startPainelListener();
   setTurno(APP.turno);
+  // Listener SV inputs → NEWS2
+  setTimeout(() => {
+    ['M','T','N'].forEach(t => {
+      ['fr','sat','pa','fc','t'].forEach(p => {
+        const el = document.getElementById(`sv_${p}_${t}`);
+        if (el) el.addEventListener('input', atualizarNEWS2, { passive: true });
+      });
+    });
+  }, 600);
+  // Listener aba tGerar → carregar histórico
+  document.addEventListener('click', ev => {
+    const btn = ev.target.closest('.tab-btn[data-tab="tGerar"]');
+    if (btn) carregarHistoricoEvolucoes();
+  });
 })
 
   // PWA — Service Worker
